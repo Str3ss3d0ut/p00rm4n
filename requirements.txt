@@ -2,4 +2,5 @@ yfinance
 pandas
 numpy
 yfinance
+altair<5
 streamlit
