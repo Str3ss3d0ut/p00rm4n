@@ -20,10 +20,12 @@ def get_exchange_rate():
         # Get GBP to USD rate
         ticker = "GBPUSD=X"
         df = yf.download(ticker, period="1d", progress=False)
-        rate = float(df['Close'].iloc[-1].item())
-        return rate
+        if not df.empty:
+            rate = float(df['Close'].iloc[-1].item())
+            return rate
+        return 1.25
     except:
-        return 1.25 # Fallback average if API fails
+        return 1.25 # Fallback average
 
 def calculate_rsi(data, window=14):
     delta = data.diff()
@@ -76,20 +78,44 @@ def run_backtest(ticker):
     except Exception:
         return None
 
-# --- TICKER FETCHING ---
+# --- ROBUST TICKER FETCHING ---
 @st.cache_data(ttl=86400)
 def get_tickers(index_name):
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    # FALLBACK LIST: If Wikipedia blocks us, use this list so the app doesn't break.
+    fallback_list = [
+        "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NFLX", "GME", "PLTR", 
+        "COIN", "MARA", "MSTR", "HOOD", "DKNG", "UBER", "LYFT", "ABNB", "SOFI", "RIVN", "LCID",
+        "F", "GM", "XOM", "CVX", "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "BA", "MMM", "CAT",
+        "DE", "LMT", "RTX", "NOC", "GD", "PFE", "MRK", "JNJ", "LLY", "UNH", "CVS", "WMT", "TGT"
+    ]
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    }
+    
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies' if index_name == "S&P 500" else 'https://en.wikipedia.org/wiki/List_of_S%26P_400_companies'
+    
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=5)
+        response.raise_for_status()
         html = pd.read_html(StringIO(response.text), header=0)
-        return html[0]['Symbol'].tolist()
-    except Exception:
-        return []
+        tickers = html[0]['Symbol'].tolist()
+        
+        # Clean up tickers (replace dots with dashes for yfinance)
+        clean_tickers = [t.replace('.', '-') for t in tickers]
+        
+        if len(clean_tickers) > 10:
+            return clean_tickers
+        else:
+            return fallback_list # Return fallback if list is suspiciously short
+            
+    except Exception as e:
+        # If scraping fails, fail gracefully to the fallback list
+        # print(f"Scraping failed: {e}") 
+        return fallback_list
 
-# --- SCANNER LOGIC ---
-# --- SCANNER LOGIC (FIXED) ---
+# --- SCANNER LOGIC (FIXED LEAKAGE) ---
 def fetch_and_scan(ticker_list, limit_num):
     results = []
     progress_bar = st.progress(0)
@@ -102,14 +128,13 @@ def fetch_and_scan(ticker_list, limit_num):
         progress_bar.progress(progress)
         status_text.text(f"Scanning {ticker}...")
         
-        # 🛡️ SAFETY CLEAR: Wipe variable to prevent leakage
+        # 🛡️ CRITICAL FIX: Clear dataframe variable to prevent "Leaking" old data
         df = pd.DataFrame() 
         
         try:
             safe_ticker = ticker.replace('.', '-')
             df = yf.download(safe_ticker, period="1y", interval="1d", progress=False)
             
-            # Check if empty
             if df.empty or len(df) < 200: 
                 continue
 
@@ -146,7 +171,7 @@ def fetch_and_scan(ticker_list, limit_num):
             elif 60 <= rsi_current <= 75: action_label = "✅ BUY NOW"
             else: action_label = "✋ HOLD"
 
-            # 🛡️ Force append ONLY if current ticker matches logic
+            # 🛡️ Check filters again before appending
             if trend_perfect and mom_sniper and vol_sniper and near_high:
                 results.append({
                     "Ticker": safe_ticker,
@@ -158,8 +183,7 @@ def fetch_and_scan(ticker_list, limit_num):
                     "ATR": round(atr, 2),
                     "SMA_50": round(sma_50, 2)
                 })
-        except Exception as e:
-            # print(f"Error on {ticker}: {e}") # Optional debug
+        except Exception:
             continue
             
     progress_bar.empty()
@@ -233,18 +257,19 @@ with tab1:
                 
                 # LOGIC FOR SOURCE SELECTION
                 if idx_choice == "My Custom List":
-                     # Clean and split the user input string into a list
                      tickers = [t.strip().upper() for t in custom_tickers.split(',') if t.strip()]
                 elif idx_choice == "S&P 500": 
                     tickers = get_tickers("S&P 500")
                 elif idx_choice == "S&P 400 (MidCap)": 
                     tickers = get_tickers("S&P 400")
                 else: 
-                    tickers = get_tickers("S&P 500") + get_tickers("S&P 400")
+                    # If fetching fails, these fallback lists ensure it never crashes
+                    t1 = get_tickers("S&P 500")
+                    t2 = get_tickers("S&P 400")
+                    tickers = t1 + t2
                 
                 if tickers:
                     st.write(f"Sniping {len(tickers)} stocks...")
-                    # If using custom list, we scan ALL of them
                     limit_to_use = len(tickers) if idx_choice == "My Custom List" else scan_limit
                     
                     df_results = fetch_and_scan(tickers, limit_to_use)
@@ -258,7 +283,7 @@ with tab1:
                         st.session_state['scan_performed'] = True
                         st.warning("No targets found in your list.")
                 else:
-                    st.error("Please enter at least one ticker.")
+                    st.error("Could not fetch tickers. Please check internet connection.")
 
     if st.session_state['scan_performed'] and st.session_state['scan_results'] is not None:
         df = st.session_state['scan_results']
@@ -285,11 +310,9 @@ with tab1:
         with col2:
             st.subheader("💷 GBP Risk Calculator (Fractional)")
             
-            # INPUT IN GBP
             account_size_gbp = st.number_input("Account Size (£)", value=10000)
             risk_pct = st.number_input("Risk %", value=1.0)
             
-            # CONVERSION LOGIC
             account_size_usd = account_size_gbp * gbp_rate
             risk_amt_gbp = account_size_gbp * (risk_pct/100)
             risk_amt_usd = risk_amt_gbp * gbp_rate
@@ -298,9 +321,7 @@ with tab1:
             risk_per_share = price - stop_price
             
             if risk_per_share > 0:
-                # --- CHANGE 1: REMOVED int() CASTING ---
                 shares = risk_amt_usd / risk_per_share
-                
                 total_cost_usd = shares * price
                 total_cost_gbp = total_cost_usd / gbp_rate
             else:
@@ -308,7 +329,6 @@ with tab1:
                 total_cost_usd = 0.0
                 total_cost_gbp = 0.0
             
-            # --- CHANGE 2: UPDATED DISPLAY FORMATTING (:.4f) ---
             st.info(f"""
             **Trade Plan:**
             * **Buy:** {shares:.4f} Shares
