@@ -1,6 +1,9 @@
+streamlit
 yfinance
 pandas
 numpy
-yfinance
-altair<5
-streamlit
+plotly
+requests
+gspread
+google-auth
+lxml
